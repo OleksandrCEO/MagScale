@@ -1,60 +1,36 @@
-#!/usr/bin/env nix-shell
-#!nix-shell -i bash -p ffmpeg-full realesrgan-ncnn-vulkan libnotify
+#!/usr/bin/env bash
 
-# --- Stable AI Video Upscaler (CPU Fallback for NixOS) ---
-
-set -e
-
-if [ -z "$1" ]; then
-    echo "Usage: ./upscale.sh input.mp4"
-    exit 1
-fi
+# 1. Налаштування шляхів
+# Знаходимо шлях до моделей у Nix-системі автоматично
+BINARY_PATH=$(readlink -f $(which realesrgan-ncnn-vulkan))
+MODELS_PATH="$(dirname "$BINARY_PATH")/../share/realesrgan-ncnn-vulkan/models"
 
 INPUT_FILE="$1"
-ABS_PATH=$(realpath "$INPUT_FILE")
-DIRNAME=$(dirname "$ABS_PATH")
-BASENAME=$(basename "$ABS_PATH")
-NAME_NO_EXT="${BASENAME%.*}"
-OUTPUT_FILE="${DIRNAME}/${NAME_NO_EXT}_upscaled.mp4"
+OUTPUT_FILE="${INPUT_FILE%.*}_upscaled_2K.mp4"
+TEMP_DIR="/tmp/upscale_work"
 
-TEMP_DIR=$(mktemp -d -p /tmp upscale_XXXXXX)
-cleanup() { rm -rf "$TEMP_DIR"; }
-trap cleanup EXIT
+# Очищення перед початком
+rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR/in" "$TEMP_DIR/out"
 
-echo "--- Processing: $INPUT_FILE ---"
-
-# 1. Екстракція кадрів
-ffmpeg -i "$INPUT_FILE" -hide_banner -loglevel error "$TEMP_DIR/%08d.png"
-
-# 2. Аудіо
+echo "--- Етап 1: Розбираємо відео на кадри ---"
+ffmpeg -i "$INPUT_FILE" -hide_banner -loglevel error "$TEMP_DIR/in/%08d.png"
 ffmpeg -i "$INPUT_FILE" -vn -acodec copy "$TEMP_DIR/audio.m4a" -hide_banner -loglevel error
 
-# 3. AI Upscale (FORCE CPU MODE)
-# -g -1  -> ПОВНІСТЮ ВИМИКАЄ GPU (використовує тільки процесор)
-# Це повільно, але 100% не впаде.
-# 3. AI Upscale (CPU MODE) з охайним прогресом
-echo "[3/4] AI Upscaling (CPU)..."
-# Використовуємо простіший спосіб обробки прогресу без складних пайпів
-realesrgan-ncnn-vulkan -i "$TEMP_DIR" -o "$TEMP_DIR" \
-    -n realesrgan-x4plus-anime -s 1.5 -f png -g -1 -j 1:1:1 2>&1 \
-    | grep --line-buffered -oP '\d+\.\d+%' \
-    | while read -r line; do
-        printf "\rProgress: %s" "$line"
-      done
-echo -e "\n[3/4] Upscaling finished!"
+echo "--- Етап 2: AI Апскейл (CPU Mode) ---"
+# Цей рядок — магія для твоєї карти 1060 3GB.
+# Ми кажемо системі: "Не бач відеокарту", щоб не було помилок пам'яті.
+export VK_VISIBLE_DEVICES=""
 
-# 4. Збирання відео
-# Отримуємо FPS надійним способом (тільки перше число)
-FPS=$(ffprobe -v 0 -of compact=p=0 -show_entries stream=r_frame_rate "$INPUT_FILE" | cut -d= -f2 | cut -d/ -f1)
-# Якщо ffprobe видав щось дивне, ставимо 30 за замовчуванням
-if [ -z "$FPS" ] || [ "$FPS" -lt 1 ]; then FPS=30; fi
+nice -n 19 realesrgan-ncnn-vulkan \
+    -i "$TEMP_DIR/in" -o "$TEMP_DIR/out" \
+    -m "$MODELS_PATH" -n realesrgan-x4plus-anime -s 2 -f png -j 1:1:1
 
-echo "[4/4] Re-assembling at $FPS FPS..."
+echo "--- Етап 3: Збираємо 2K відео ---"
+# Дізнаємося FPS оригіналу
+FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" | cut -d/ -f1)
 
-# Збираємо, ігноруючи можливі помилки метаданих
-ffmpeg -framerate "$FPS" -i "$TEMP_DIR/%08d.png" -i "$TEMP_DIR/audio.m4a" \
-    -map 0:v:0 -map 1:a:0? \
-    -c:v libx264 -crf 18 -pix_fmt yuv420p \
-    -shortest -y "$OUTPUT_FILE" -hide_banner -loglevel error
+ffmpeg -framerate "$FPS" -i "$TEMP_DIR/out/%08d.png" -i "$TEMP_DIR/audio.m4a" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p -shortest -y "$OUTPUT_FILE"
 
-notify-send "AI Upscale Done" "CPU processing finished"
+echo "Готово! Файл: $OUTPUT_FILE"
+rm -rf "$TEMP_DIR"
