@@ -17,13 +17,22 @@ ffmpeg -i "$INPUT_FILE" -hide_banner -loglevel error "$TEMP_DIR/in/%08d.png"
 ffmpeg -i "$INPUT_FILE" -vn -acodec copy "$TEMP_DIR/audio.m4a" -hide_banner -loglevel error
 
 echo "--- Етап 2: AI Апскейл (CPU Mode) ---"
-# Цей рядок — магія для твоєї карти 1060 3GB.
-# Ми кажемо системі: "Не бач відеокарту", щоб не було помилок пам'яті.
+# Приховуємо GPU для стабільності
 export VK_VISIBLE_DEVICES=""
 
+# Визначаємо шлях до моделей ще раз, максимально надійно
+MODELS_PATH=$(dirname $(readlink -f $(which realesrgan-ncnn-vulkan)))/../share/realesrgan-ncnn-vulkan/models
+
+# Використовуємо модель v3 - вона стабільніша для відео
+# -n realesr-animevideov3
 nice -n 19 realesrgan-ncnn-vulkan \
-    -i "$TEMP_DIR/in" -o "$TEMP_DIR/out" \
-    -m "$MODELS_PATH" -n realesrgan-x4plus-anime -s 2 -f png -j 1:1:1
+    -i "$TEMP_DIR/in" \
+    -o "$TEMP_DIR/out" \
+    -m "$MODELS_PATH" \
+    -n realesr-animevideov3 \
+    -s 2 \
+    -f png \
+    -j 1:1:1
 
 echo "--- Етап 3: Збираємо 2K відео ---"
 # Дізнаємося FPS оригіналу
